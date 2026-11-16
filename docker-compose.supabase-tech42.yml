@@ -1,0 +1,57 @@
+# Tech42 — Supabase mínimo + limites de RAM (teste DeskcommCRM)
+# Desliga: studio, functions, meta, supavisor/pooler
+# Mantém: db, api-gw, auth, rest, realtime, storage, imgproxy (dep. storage)
+
+services:
+  studio:
+    profiles: ["nao-usar"]
+    mem_limit: 64m
+    restart: unless-stopped
+
+  functions:
+    profiles: ["nao-usar"]
+    mem_limit: 64m
+    restart: unless-stopped
+
+  meta:
+    profiles: ["nao-usar"]
+    mem_limit: 64m
+    restart: unless-stopped
+
+  supavisor:
+    profiles: ["nao-usar"]
+    ports: !reset []
+    mem_limit: 128m
+    restart: unless-stopped
+
+  api-gw:
+    # Remove dependência do Studio (dashboard não é usado neste teste)
+    depends_on: !override {}
+    mem_limit: 96m
+    restart: unless-stopped
+    ports: !override
+      - "127.0.0.1:${API_GW_HTTP_PORT:-10050}:8000"
+
+  auth:
+    mem_limit: 96m
+    restart: unless-stopped
+
+  rest:
+    mem_limit: 80m
+    restart: unless-stopped
+
+  realtime:
+    mem_limit: 160m
+    restart: unless-stopped
+
+  storage:
+    mem_limit: 120m
+    restart: unless-stopped
+
+  imgproxy:
+    mem_limit: 48m
+    restart: unless-stopped
+
+  db:
+    mem_limit: 384m
+    restart: unless-stopped
