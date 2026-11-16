@@ -60,8 +60,10 @@ docker compose --env-file .env \
 
 ## Caddy
 
-Bloco em `/srv/infraestrutura/caddy/Caddyfile`:  
-`deskcomm.jcplanejamento.com.br` → app `127.0.0.1:10028` + `/auth|/rest|/realtime|/storage|/functions|/graphql` → `127.0.0.1:10050`.  
+Blocos em `/srv/infraestrutura/caddy/Caddyfile` (paralelos):  
+- `fala42.tech42.com.br` (público) → app `127.0.0.1:10028` + supabase paths → `127.0.0.1:10050`  
+- `deskcomm.jcplanejamento.com.br` (legado, mantido) → mesmos upstreams  
+WAHA global `/api/v1/webhooks/waha` → 403 em ambos.  
 Studio **não** exposto. Alterar só com backup → `caddy validate` → `docker exec jc-caddy caddy reload` (nunca restart).
 
 ## Limites de memória (MiB) — overlays Tech42
