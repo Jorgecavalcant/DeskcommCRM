@@ -276,7 +276,12 @@ export async function reagirAConclusaoDeDerivacao(
       try {
         const r = await devolverAtendimentoAoAgente(
           { supabase: admin, organizationId, actor: ATOR, requestId },
-          { conversationId },
+          {
+            conversationId,
+            // A mídia que acabou de derivar — força o despacho mesmo se o
+            // aviso de handoff (outbound) estiver depois dela no histórico.
+            inboundMessageIdParaDespacho: messageId,
+          },
         );
         devolvido = r.ok;
       } catch (erro) {
@@ -287,7 +292,8 @@ export async function reagirAConclusaoDeDerivacao(
       }
       if (devolvido) {
         await gravarResolucao(admin, conversa, marca, agora, true);
-        await reenfileirarTurno(admin, { organizationId, conversation: conversa, messageId, requestId });
+        // Reenfileiramento: só em `devolverAtendimentoAoAgente` (passo 7),
+        // com o id forçado acima — chamar de novo aqui dobraria o dispatch.
         return { acao: "devolver" };
       }
       // A devolução não saiu (conflito de atribuição, senha/booking, trava): o
@@ -385,39 +391,4 @@ async function gravarResolucao(
     .eq("id", conversa.id)
     .eq("organization_id", conversa.organization_id ?? "");
   if (error) logger.warn("handoff-tecnico: marca nao resolvida", { error: error.message });
-}
-
-/**
- * Enfileira o turno que não aconteceu.
- *
- * Mesmo evento de um texto normal (`ai_agent.dispatch_requested`), então passa
- * pelo drain — que é quem segura na porta: elegibilidade, grupo, debounce,
- * anti-backlog (se um texto mais novo já estiver na fila, este turno é
- * dispensado) e idempotência por `source_event_id`.
- */
-async function reenfileirarTurno(
-  admin: SupabaseClient,
-  entrada: {
-    organizationId: string;
-    conversation: ConversaLida;
-    messageId: string;
-    requestId: string;
-  },
-): Promise<void> {
-  const { organizationId, conversation, messageId, requestId } = entrada;
-  const { error } = await admin.rpc("emit_event", {
-    p_event_type: "ai_agent.dispatch_requested",
-    p_entity_kind: "message",
-    p_entity_id: messageId,
-    p_payload: {
-      organization_id: organizationId,
-      conversation_id: conversation.id,
-      contact_id: conversation.contact_id,
-      channel_session_id: conversation.channel_session_id,
-      inbound_message_id: messageId,
-    },
-    p_metadata: { source: "media-derive-worker", request_id: requestId, motivo: "derivacao_concluiu_apos_handoff" },
-    p_organization_id: organizationId,
-  });
-  if (error) logger.warn("handoff-tecnico: turno nao reenfileirado", { error: error.message });
 }

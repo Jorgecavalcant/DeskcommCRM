@@ -226,7 +226,7 @@ describe("a derivação que conclui depois do handoff (#2210)", () => {
     messageRow.metadata = null;
   });
 
-  it("devolve o atendimento e (re)enfileira o turno — o caso medido na issue", async () => {
+  it("devolve o atendimento forçando o despacho da mídia derivada — o emit mora na retomada", async () => {
     const r = await deriveMessageMedia(eventRow());
 
     expect(r.status).toBe("ok");
@@ -235,21 +235,17 @@ describe("a derivação que conclui depois do handoff (#2210)", () => {
       "a conversa seguia silenciada até alguém clicar em 'Devolver ao automático'",
     ).toHaveBeenCalledTimes(1);
     expect(devolverMock.mock.calls[0]![0]).toMatchObject({ organizationId: "org1" });
-    expect(devolverMock.mock.calls[0]![1]).toMatchObject({ conversationId: "conv1" });
-
-    const dispatch = dispatchesEmitidos();
-    expect(dispatch, "o turno tardio precisa ser (re)enfileirado, senão ninguém responde").toHaveLength(1);
-    expect(dispatch[0]).toMatchObject({
-      p_entity_kind: "message",
-      p_entity_id: "msg1",
-      p_organization_id: "org1",
-      p_payload: expect.objectContaining({
-        conversation_id: "conv1",
-        contact_id: "cont1",
-        channel_session_id: "sess1",
-        inbound_message_id: "msg1",
-      }),
+    expect(devolverMock.mock.calls[0]![1]).toMatchObject({
+      conversationId: "conv1",
+      // Sem o id forçado, o aviso de handoff (outbound) esconderia a mídia.
+      inboundMessageIdParaDespacho: "msg1",
     });
+
+    // O dispatch_requested sai de `devolverAtendimentoAoAgente` (passo 7),
+    // não daqui — chamar de novo dobraria o turno. Este arquivo mocka a
+    // retomada, então zero emit local; a prova do emit com id forçado vive
+    // em `retorno-reenfileira-inbound-pendente.test.ts`.
+    expect(dispatchesEmitidos()).toHaveLength(0);
   });
 
   it("humano assumiu a conversa: corrige o motivo e NÃO arranca a conversa da pessoa", async () => {

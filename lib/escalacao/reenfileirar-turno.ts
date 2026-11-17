@@ -1,0 +1,99 @@
+/**
+ * Enfileira UM turno inbound normal a partir de uma mensagem já gravada.
+ *
+ * Mesmo evento de um texto novo (`ai_agent.dispatch_requested`), então passa
+ * pelo drain — que é quem segura na porta: elegibilidade, grupo, debounce,
+ * anti-backlog (se um texto mais novo já estiver na fila, este turno é
+ * dispensado) e idempotência por `source_event_id` / entity da mensagem.
+ *
+ * Usado pela reação ao handoff técnico (derivação que concluiu) e pela
+ * devolução do atendimento ao agente quando há inbound pendente.
+ */
+
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import { logger } from "@/lib/logger";
+
+export type ConversaParaDespacho = {
+  id: string;
+  contact_id: string | null;
+  channel_session_id: string | null;
+};
+
+export async function reenfileirarTurno(
+  admin: SupabaseClient,
+  entrada: {
+    organizationId: string;
+    conversation: ConversaParaDespacho;
+    messageId: string;
+    requestId: string;
+    /** De onde veio o reenfileiramento — telemetria do event_log. */
+    source: string;
+    motivo?: string;
+  },
+): Promise<void> {
+  const { organizationId, conversation, messageId, requestId, source, motivo } = entrada;
+  if (!conversation.contact_id || !conversation.channel_session_id) return;
+
+  const { error } = await admin.rpc("emit_event", {
+    p_event_type: "ai_agent.dispatch_requested",
+    p_entity_kind: "message",
+    p_entity_id: messageId,
+    p_payload: {
+      organization_id: organizationId,
+      conversation_id: conversation.id,
+      contact_id: conversation.contact_id,
+      channel_session_id: conversation.channel_session_id,
+      inbound_message_id: messageId,
+    },
+    p_metadata: {
+      source,
+      request_id: requestId,
+      ...(motivo ? { motivo } : {}),
+    },
+    p_organization_id: organizationId,
+  });
+  if (error) {
+    logger.warn("reenfileirar-turno: dispatch nao emitido", {
+      source,
+      conversation_id: conversation.id,
+      message_id: messageId,
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * A inbound mais recente depois da última outbound — critério de "há pergunta
+ * pendente", NÃO `ultima_inbound_vista_em` (um turno coalescido pode ter
+ * "visto" a mensagem sem ter respondido).
+ *
+ * Retorna o id da inbound mais nova do bloco pendente, ou null se a última
+ * fala foi nossa (atendente/IA) ou se não há inbound.
+ */
+export async function idDaInboundPendenteAposUltimaOutbound(
+  admin: SupabaseClient,
+  entrada: { organizationId: string; conversationId: string },
+): Promise<string | null> {
+  const { data, error } = await admin
+    .from("messages")
+    .select("id, direction")
+    .eq("organization_id", entrada.organizationId)
+    .eq("conversation_id", entrada.conversationId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (error) {
+    logger.warn("reenfileirar-turno: nao li mensagens para pendencia", {
+      conversation_id: entrada.conversationId,
+      error: error.message,
+    });
+    return null;
+  }
+
+  for (const row of (data ?? []) as Array<{ id: string; direction: string }>) {
+    if (row.direction === "outbound") return null;
+    if (row.direction === "inbound") return row.id;
+  }
+  return null;
+}

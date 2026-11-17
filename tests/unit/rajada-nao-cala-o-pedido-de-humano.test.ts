@@ -45,15 +45,18 @@ const contexto: LeadContext = {
 } as unknown as LeadContext;
 
 describe("rajada coalescida: o turno responde à 1ª e OUVE a 2ª", () => {
-  it("o bloco de mensagem atual nomeia a mensagem do job — a PRIMEIRA", () => {
-    // `currentInboundText` é o corpo da linha que o job aponta.
+  it("o bloco de mensagem atual lista TODAS as pendentes — a 2ª não fica só no histórico", () => {
+    // O drain coalesce: o job aponta a PRIMEIRA, mas a abertura tem de trazer
+    // a rajada inteira. Antes só a 1ª entrava em "## Mensagem atual" e a IA
+    // respondia só o "oi", calando o pedido da 2ª.
     const abertura = buildOpeningMessage(null, null, contexto, "sem notas", false, [], "", PRIMEIRA);
 
     expect(abertura).toContain("## Mensagem atual do cliente — fonte prioritária");
     expect(abertura).toContain(JSON.stringify({ texto: PRIMEIRA }));
-    // E não promove a segunda a "mensagem atual" — ela é do histórico, e é lá
-    // que o modelo a lê. Promovê-la desfaria o conserto do registro concorrente.
-    expect(abertura).not.toContain(JSON.stringify({ texto: SEGUNDA }));
+    expect(abertura).toContain(JSON.stringify({ texto: SEGUNDA }));
+    expect(abertura).toMatch(/Responda a TODAS numa única resposta/i);
+    // Cada mensagem é um JSON próprio — nunca emendadas num texto só.
+    expect(abertura).not.toContain(`${PRIMEIRA}\n${SEGUNDA}`);
   });
 
   it("o pedido de humano da 2ª mensagem É ouvido — é a linha que o pin quase calou", () => {
