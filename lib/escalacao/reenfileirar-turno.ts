@@ -30,9 +30,16 @@ export async function reenfileirarTurno(
     /** De onde veio o reenfileiramento — telemetria do event_log. */
     source: string;
     motivo?: string;
+    /**
+     * Devolução ao robô: o turno do prompt usa corte na última outbound humana
+     * (`inboundsNaoRespondidos` com `ultima_humana`). Sem migration — viaja no
+     * payload do evento → job. Ausente = turno normal (corte clássico).
+     */
+    cortePendencias?: "ultima_humana";
   },
 ): Promise<void> {
-  const { organizationId, conversation, messageId, requestId, source, motivo } = entrada;
+  const { organizationId, conversation, messageId, requestId, source, motivo, cortePendencias } =
+    entrada;
   if (!conversation.contact_id || !conversation.channel_session_id) return;
 
   const { error } = await admin.rpc("emit_event", {
@@ -45,6 +52,7 @@ export async function reenfileirarTurno(
       contact_id: conversation.contact_id,
       channel_session_id: conversation.channel_session_id,
       inbound_message_id: messageId,
+      ...(cortePendencias ? { corte_pendencias: cortePendencias } : {}),
     },
     p_metadata: {
       source,

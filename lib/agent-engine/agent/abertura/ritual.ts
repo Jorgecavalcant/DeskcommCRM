@@ -16,7 +16,10 @@ import { rotuloDoRemetente } from "@/lib/messaging/remetente-de-grupo";
 
 import type { LeadContext, LeadContextMessage } from "../../edge/crm/get-lead-context";
 import type { LeadStateRow } from "../lead-state";
-import { pendentesDaMensagemAtual } from "../inbounds-nao-respondidos";
+import {
+  pendentesDaMensagemAtual,
+  type CorteDePendencias,
+} from "../inbounds-nao-respondidos";
 import { projetarContexto, type MensagemProjetada } from "../projecao";
 
 import type { LeadCheckpointRow } from "./checkpoint";
@@ -314,12 +317,19 @@ export function buildOpeningMessage(
    * não trocou de agente. Ver `passagem-do-roteador.ts`.
    */
   passagemBlock = '',
+  /**
+   * Corte das pendentes no bloco "Mensagem atual". Default `classico` (qualquer
+   * outbound corta, exceto aviso de transferência). Só a devolução passa
+   * `ultima_humana` — ver `corte_pendencias` no payload do job.
+   */
+  cortePendencias: CorteDePendencias = "classico",
 ): string {
   const entregue = (nome: string): boolean => entregues.includes(nome);
   const pendentes = pendentesDaMensagemAtual(
     context.messages,
     currentInboundText,
     currentInboundSender,
+    { corte: cortePendencias },
   );
   // Rajada: MAIS DE UMA inbound sem resposta — listar TODAS (JSON separado cada
   // uma; nunca emendadas). Com UMA, o bloco abaixo fica BYTE A BYTE o de sempre.

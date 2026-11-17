@@ -105,6 +105,10 @@ describe('o turno inbound repassa o bloco ao buildOpening', () => {
 
   it('entrega o bloco ao buildOpening pelo ritual da abertura', () => {
     expect(fonte).toMatch(/origemBlock,\n\s+passagemBlock,\n\s+formatoDoHistorico/);
-    expect(fonte).toMatch(/origemBlock,\n\s+formatoDoHistorico,\n\s+passagemBlock,\n\s+\)/);
+    // `cortePendencias` (devolução) vem depois do bloco de passagem — o default
+    // clássico não muda o ritual; só a retomada passa `ultima_humana`.
+    expect(fonte).toMatch(
+      /origemBlock,\n\s+formatoDoHistorico,\n\s+passagemBlock,\n\s+cortePendencias,\n\s+\)/,
+    );
   });
 });

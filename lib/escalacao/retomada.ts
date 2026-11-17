@@ -436,6 +436,9 @@ async function talvezReenfileirarPendente(
     requestId: deps.requestId,
     source: "escalacao.retomada",
     motivo,
+    // O turno da devolução lista pendências desde a última outbound HUMANA —
+    // saudação/aviso da IA não escondem a pergunta do cliente no prompt.
+    cortePendencias: "ultima_humana",
   });
 }
 

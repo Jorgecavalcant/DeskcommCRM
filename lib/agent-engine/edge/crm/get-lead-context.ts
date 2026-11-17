@@ -45,14 +45,19 @@ export interface LeadContextMessage {
   /** Corpo textual; mídia usa o derivado (transcrição/visão/pdf) ou marcador [tipo]. */
   body: string;
   /**
-   * Autoria da outbound — o mesmo corte da retomada (`outboundHumanaRespondeu`).
-   * Sem isto, o bloco "Mensagem atual" cortava na primeira outbound (aviso da IA
-   * inclusive) e a rajada perdia perguntas ainda sem resposta humana.
-   * Ausente em fixtures antigas = trata como "desconhecido" (corte clássico).
+   * Autoria da outbound — alimenta o corte `ultima_humana` na devolução
+   * (`outboundHumanaRespondeu`). Ausente em fixtures antigas = trata como
+   * "desconhecido" (qualquer outbound corta).
    */
   sent_via?: string | null;
   /** Preenchido quando um humano do time enviou — vence `sent_via` no corte. */
   sent_by_user_id?: string | null;
+  /**
+   * Marca do aviso de transferência (`messages.metadata.aviso_de_escalacao`).
+   * No corte clássico essa outbound NÃO zera pendências — a pergunta do cliente
+   * antes do aviso continua listada. Ausente = não é aviso.
+   */
+  aviso_de_escalacao?: boolean;
   /**
    * Quem escreveu esta mensagem quando ela veio de um GRUPO (#2729).
    *
@@ -532,6 +537,7 @@ function fitToBudget(
     // recebido de grupo traz `group_sender` (o ingest grava só nesse sentido);
     // nas demais linhas o campo fica AUSENTE, e o prompt não ganha ruído.
     const remetente = m.direction === 'inbound' ? lerRemetenteDeGrupo(m.metadata) : null;
+    const avisoDeEscalacao = m.metadata?.aviso_de_escalacao === true;
     return {
       direction: m.direction,
       body,
@@ -540,6 +546,7 @@ function fitToBudget(
       sent_at: isoLocalComOffset(m.sent_at, fuso),
       ...(m.sent_via !== undefined ? { sent_via: m.sent_via } : {}),
       ...(m.sent_by_user_id !== undefined ? { sent_by_user_id: m.sent_by_user_id } : {}),
+      ...(avisoDeEscalacao ? { aviso_de_escalacao: true } : {}),
       ...(remetente !== null && (remetente.name !== null || remetente.phone !== null)
         ? { sender: { name: remetente.name, phone: remetente.phone } }
         : {}),

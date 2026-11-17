@@ -197,6 +197,7 @@ describe("retorno do humano reenfileira inbound pendente", () => {
         conversation_id: CONV,
         contact_id: CONTATO,
         channel_session_id: CANAL,
+        corte_pendencias: "ultima_humana",
       }),
       p_metadata: expect.objectContaining({
         source: "escalacao.retomada",
