@@ -243,6 +243,10 @@ do_rollback() {
   local app_d="$4"
   local worker_d="$5"
 
+  # Evita reentrada do trap ERR durante o próprio rollback.
+  trap - ERR
+  compose_alterado=0
+
   log "ROLLBACK ${tag} ${motivo}"
   if [ -f "$backup_compose" ]; then
     cp "$backup_compose" "${PROJECT_DIR}/${COMPOSE_OVERRIDE}"
@@ -261,6 +265,16 @@ do_rollback() {
   mark_digest_ruim "$app_d" "$worker_d"
   exit 1
 }
+
+# Se o compose override já foi patchado e algo inesperado falhar, reverte.
+compose_alterado=0
+# shellcheck disable=SC2317 # invocado via trap ERR
+on_err_inesperado() {
+  if [ "${compose_alterado:-0}" -eq 1 ]; then
+    do_rollback "${TAG:-unknown}" "erro_inesperado" "${backup_compose:-}" "${app_digest:-}" "${worker_digest:-}"
+  fi
+}
+trap on_err_inesperado ERR
 
 # --- CLI ---
 while [ $# -gt 0 ]; do
@@ -337,9 +351,15 @@ if [ "$DRY_RUN" -eq 1 ]; then
   log "[dry-run] pull ${worker_ref_digest}"
 else
   log "pull ${app_ref_digest}"
-  docker pull "$app_ref_digest"
+  if ! docker pull "$app_ref_digest"; then
+    log "pull falhou"
+    exit 0
+  fi
   log "pull ${worker_ref_digest}"
-  docker pull "$worker_ref_digest"
+  if ! docker pull "$worker_ref_digest"; then
+    log "pull falhou"
+    exit 0
+  fi
 fi
 
 # (e) revisions iguais?
@@ -439,6 +459,7 @@ tmp2="$(mktemp)"
 patch_service_image app "$app_tagged" "$compose_path" "$tmp"
 patch_service_image worker "$worker_tagged" "$tmp" "$tmp2"
 cp "$tmp2" "$compose_path"
+compose_alterado=1
 rm -f "$tmp" "$tmp2"
 
 images_out="$(compose config --images 2>/dev/null || true)"
@@ -446,6 +467,7 @@ if ! printf '%s\n' "$images_out" | grep -Fq "$app_tagged" \
   || ! printf '%s\n' "$images_out" | grep -Fq "$worker_tagged"; then
   log "validação compose config --images falhou; restaurando"
   cp "$backup_compose" "$compose_path"
+  compose_alterado=0
   exit 1
 fi
 
@@ -453,7 +475,9 @@ fi
 rc_app0="$(container_restart_count "$APP_CONTAINER")"
 rc_worker0="$(container_restart_count "$WORKER_CONTAINER")"
 log "up -d --no-deps app worker (${TAG})"
-compose up -d --no-deps app worker
+if ! compose up -d --no-deps app worker; then
+  do_rollback "$TAG" "up_falhou" "$backup_compose" "$app_digest" "$worker_digest"
+fi
 
 # (i) health
 if ! wait_healthy "$TAG" "$rc_app0" "$rc_worker0"; then

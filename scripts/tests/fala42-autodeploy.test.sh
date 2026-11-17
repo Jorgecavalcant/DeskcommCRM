@@ -200,6 +200,9 @@ case "\$CMD" in
     fi
     if [ "\$has_up" -eq 1 ]; then
       echo "up \$*" >>"\$STUB/docker.log"
+      if [ -f "\$STUB/up-fail" ]; then
+        exit 1
+      fi
       exit 0
     fi
     exit 0
@@ -314,6 +317,24 @@ assert_file_has "health_rollback.compose_restaurado" "$DIR/project/docker-compos
 assert_file_has "health_rollback.ruins" "$DIR/state/digests-ruins" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 if [ "$code" != "1" ]; then
   echo "DEBUG rollback stdout:"; cat /tmp/ad-out-rb.txt
+  echo "DEBUG log:"; cat "$LOG" 2>/dev/null || true
+fi
+rm -rf "$DIR"
+
+# --- up falha → rollback ---
+DIR="$(mktemp -d "${TMPDIR:-/tmp}/fala42-ad-XXXXXX")"
+setup_case "$DIR"
+touch "$DIR/stubstate/up-fail"
+set +e
+"$SCRIPT" >/tmp/ad-out-upfail.txt 2>&1
+code=$?
+set -e
+assert_eq "up_rollback.exit" "$code" "1"
+assert_file_has "up_rollback.log" "$LOG" "ROLLBACK sha-aaaaaaa up_falhou"
+assert_file_has "up_rollback.compose_restaurado" "$DIR/project/docker-compose.tech42.yml" "sha-oldold1"
+assert_file_has "up_rollback.ruins" "$DIR/state/digests-ruins" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+if [ "$code" != "1" ]; then
+  echo "DEBUG upfail stdout:"; cat /tmp/ad-out-upfail.txt
   echo "DEBUG log:"; cat "$LOG" 2>/dev/null || true
 fi
 rm -rf "$DIR"
