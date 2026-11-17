@@ -1,10 +1,10 @@
 /**
- * RETORNO DO HUMANO COM PERGUNTA PENDENTE.
+ * RETORNO DO HUMANO COM PERGUNTA PENDENTE / NOTA DO OPERADOR.
  *
- * Quando o atendente devolve a conversa à IA e há inbound depois da última
- * outbound, `devolverAtendimentoAoAgente` enfileira UM turno inbound normal.
- * Se o atendente falou por último, não enfileira. Critério = inbound após
- * última outbound — não `ultima_inbound_vista_em`.
+ * - Aviso de handoff da IA (sent_via=ai) NÃO zera pendência.
+ * - Outbound humana por último, sem nota → silêncio.
+ * - Outbound humana por último + nota nova → um turno (instrução).
+ * - Devolução dupla → mesmo entity_id (dedupe do event path).
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -20,10 +20,17 @@ const CANAL = "88888888-8888-4888-8888-888888888888";
 const ATENDENTE = "11111111-1111-4111-8111-111111111111";
 const MSG_INBOUND = "99999999-9999-4999-8999-999999999999";
 const MSG_OUTBOUND = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const MSG_AVISO_IA = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 const USUARIO: Actor = { type: "user", id: ATENDENTE, role: "manager" };
 
-type Msg = { id: string; direction: "inbound" | "outbound"; created_at: string };
+type Msg = {
+  id: string;
+  direction: "inbound" | "outbound";
+  created_at: string;
+  sent_via?: string | null;
+  sent_by_user_id?: string | null;
+};
 
 interface Cenario {
   mensagens: Msg[];
@@ -31,10 +38,14 @@ interface Cenario {
   status?: string;
   contact_id?: string | null;
   ai_opt_out?: boolean;
+  /** Notas internas (conversation_notes) — dispara turno mesmo com outbound humana. */
+  notas?: Array<{ body: string; created_by_name: string | null; created_at: string }>;
+  service_revision?: number;
 }
 
 interface Cap {
   rpc: Array<{ fn: string; args: Record<string, unknown> }>;
+  inserts: Array<{ tabela: string; valores: Record<string, unknown> }>;
 }
 
 function fazerSupabase(cenario: Cenario, cap: Cap) {
@@ -47,14 +58,20 @@ function fazerSupabase(cenario: Cenario, cap: Cap) {
     assigned_to_user_id: ATENDENTE,
     assignee_kind: "user",
     bot_silenced_until: "infinity",
+    service_revision: cenario.service_revision ?? 1,
+    current_demanda_id: null,
   };
 
   const from = (tabela: string) => {
     let ehUpdate = false;
+    let filtroDirection: string | null = null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const chain: any = {
       select: () => chain,
-      eq: () => chain,
+      eq: (coluna: string, valor: unknown) => {
+        if (coluna === "direction") filtroDirection = String(valor);
+        return chain;
+      },
       is: () => chain,
       in: () => chain,
       order: () => chain,
@@ -63,7 +80,10 @@ function fazerSupabase(cenario: Cenario, cap: Cap) {
         ehUpdate = true;
         return chain;
       },
-      insert: () => Promise.resolve({ data: null, error: null }),
+      insert: (valores: Record<string, unknown>) => {
+        cap.inserts.push({ tabela, valores });
+        return Promise.resolve({ data: null, error: null });
+      },
       maybeSingle: () => {
         if (ehUpdate && tabela === "contacts") {
           return Promise.resolve({ data: { id: CONTATO }, error: null });
@@ -86,11 +106,28 @@ function fazerSupabase(cenario: Cenario, cap: Cap) {
         if (tabela === "crm_pipelines") {
           return Promise.resolve({ data: { id: "pipe-1" }, error: null });
         }
+        if (tabela === "messages" && filtroDirection === "inbound") {
+          const inbound = cenario.mensagens.find((m) => m.direction === "inbound");
+          return Promise.resolve({ data: inbound ? { id: inbound.id } : null, error: null });
+        }
+        if (tabela === "messages") {
+          // última outbound ai (continuidade)
+          const ai = cenario.mensagens.find(
+            (m) => m.direction === "outbound" && m.sent_via === "ai",
+          );
+          return Promise.resolve({
+            data: ai ? { created_at: ai.created_at } : null,
+            error: null,
+          });
+        }
         return Promise.resolve({ data: null, error: null });
       },
       then: (res: (v: unknown) => unknown) => {
         if (tabela === "messages") {
           return Promise.resolve({ data: cenario.mensagens, error: null }).then(res);
+        }
+        if (tabela === "conversation_notes") {
+          return Promise.resolve({ data: cenario.notas ?? [], error: null }).then(res);
         }
         return Promise.resolve({ data: [], error: null }).then(res);
       },
@@ -133,12 +170,18 @@ function dispatches(cap: Cap) {
 
 describe("retorno do humano reenfileira inbound pendente", () => {
   it("pergunta pendente → enfileira exatamente um turno", async () => {
-    const cap: Cap = { rpc: [] };
+    const cap: Cap = { rpc: [], inserts: [] };
     const res = await retomar(
       {
         mensagens: [
           { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T12:00:00Z" },
-          { id: MSG_OUTBOUND, direction: "outbound", created_at: "2026-09-06T11:00:00Z" },
+          {
+            id: MSG_OUTBOUND,
+            direction: "outbound",
+            sent_via: "user",
+            sent_by_user_id: ATENDENTE,
+            created_at: "2026-09-06T11:00:00Z",
+          },
         ],
       },
       cap,
@@ -154,6 +197,7 @@ describe("retorno do humano reenfileira inbound pendente", () => {
         conversation_id: CONV,
         contact_id: CONTATO,
         channel_session_id: CANAL,
+        corte_pendencias: "ultima_humana",
       }),
       p_metadata: expect.objectContaining({
         source: "escalacao.retomada",
@@ -162,12 +206,73 @@ describe("retorno do humano reenfileira inbound pendente", () => {
     });
   });
 
-  it("atendente falou por último → não enfileira", async () => {
-    const cap: Cap = { rpc: [] };
+  it("aviso de handoff da IA por último + pergunta pendente → enfileira um turno", async () => {
+    const cap: Cap = { rpc: [], inserts: [] };
     const res = await retomar(
       {
         mensagens: [
-          { id: MSG_OUTBOUND, direction: "outbound", created_at: "2026-09-06T12:00:00Z" },
+          {
+            id: MSG_AVISO_IA,
+            direction: "outbound",
+            sent_via: "ai",
+            sent_by_user_id: null,
+            created_at: "2026-09-06T12:05:00Z",
+          },
+          { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T12:00:00Z" },
+        ],
+      },
+      cap,
+    );
+
+    expect(res.ok).toBe(true);
+    expect(dispatches(cap)).toHaveLength(1);
+    expect(dispatches(cap)[0]!.args.p_entity_id).toBe(MSG_INBOUND);
+    expect(dispatches(cap)[0]!.args.p_metadata).toMatchObject({
+      motivo: "retorno_com_inbound_pendente",
+    });
+  });
+
+  it("saudação da IA por último + rajada com pergunta → um turno (dedupe por entity)", async () => {
+    // Caso real: "Olá" + "Como funciona o fiado?" → IA só "Oi, Bruna!".
+    const msgOla = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const cap: Cap = { rpc: [], inserts: [] };
+    const res = await retomar(
+      {
+        mensagens: [
+          {
+            id: MSG_AVISO_IA,
+            direction: "outbound",
+            sent_via: "ai",
+            sent_by_user_id: null,
+            created_at: "2026-09-06T12:06:00Z",
+          },
+          { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T12:05:00Z" },
+          { id: msgOla, direction: "inbound", created_at: "2026-09-06T12:04:00Z" },
+        ],
+      },
+      cap,
+    );
+
+    expect(res.ok).toBe(true);
+    expect(dispatches(cap)).toHaveLength(1);
+    expect(dispatches(cap)[0]!.args.p_entity_id).toBe(MSG_INBOUND);
+    expect(dispatches(cap)[0]!.args.p_metadata).toMatchObject({
+      motivo: "retorno_com_inbound_pendente",
+    });
+  });
+
+  it("atendente falou por último, sem nota → não enfileira", async () => {
+    const cap: Cap = { rpc: [], inserts: [] };
+    const res = await retomar(
+      {
+        mensagens: [
+          {
+            id: MSG_OUTBOUND,
+            direction: "outbound",
+            sent_via: "user",
+            sent_by_user_id: ATENDENTE,
+            created_at: "2026-09-06T12:00:00Z",
+          },
           { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T11:00:00Z" },
         ],
       },
@@ -178,12 +283,61 @@ describe("retorno do humano reenfileira inbound pendente", () => {
     expect(dispatches(cap)).toHaveLength(0);
   });
 
-  it("id forçado (handoff técnico) despacha mesmo com outbound depois — aviso de handoff", async () => {
-    const cap: Cap = { rpc: [] };
+  it("humano respondeu por último + nota nova → um turno com instrução no checkpoint", async () => {
+    const cap: Cap = { rpc: [], inserts: [] };
     const res = await retomar(
       {
         mensagens: [
-          { id: MSG_OUTBOUND, direction: "outbound", created_at: "2026-09-06T12:00:00Z" },
+          {
+            id: MSG_OUTBOUND,
+            direction: "outbound",
+            sent_via: "user",
+            sent_by_user_id: ATENDENTE,
+            created_at: "2026-09-06T12:00:00Z",
+          },
+          { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T11:00:00Z" },
+        ],
+        notas: [
+          {
+            body: "responda o que o cliente está perguntando, o preço pode pegar na tabela",
+            created_by_name: "Ana",
+            created_at: "2026-09-06T12:10:00Z",
+          },
+        ],
+      },
+      cap,
+    );
+
+    expect(res.ok).toBe(true);
+    expect(dispatches(cap)).toHaveLength(1);
+    expect(dispatches(cap)[0]!.args).toMatchObject({
+      p_entity_id: MSG_INBOUND,
+      p_metadata: expect.objectContaining({ motivo: "retorno_com_nota_do_operador" }),
+    });
+
+    const checkpoint = cap.inserts.find((i) => i.tabela === "lead_checkpoints");
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint!.valores).toMatchObject({
+      conversation_id: CONV,
+      service_revision: 1,
+    });
+    const resumo = String(checkpoint!.valores.rolling_summary);
+    expect(resumo).toContain("## Instrução do operador");
+    expect(resumo).toMatch(/KB e as regras VENCEM/i);
+    expect(resumo).toContain("preço pode pegar na tabela");
+  });
+
+  it("id forçado (handoff técnico) despacha mesmo com outbound depois — aviso de handoff", async () => {
+    const cap: Cap = { rpc: [], inserts: [] };
+    const res = await retomar(
+      {
+        mensagens: [
+          {
+            id: MSG_OUTBOUND,
+            direction: "outbound",
+            sent_via: "ai",
+            created_at: "2026-09-06T12:00:00Z",
+          },
           { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T11:00:00Z" },
         ],
       },
@@ -201,14 +355,20 @@ describe("retorno do humano reenfileira inbound pendente", () => {
     });
   });
 
-  it("retorno repetido com a mesma pendente → mesmo entity_id (dedupe do event path)", async () => {
+  it("devolução dupla com a mesma pendente → mesmo entity_id (um turno lógico)", async () => {
     const cenario: Cenario = {
       mensagens: [
+        {
+          id: MSG_AVISO_IA,
+          direction: "outbound",
+          sent_via: "ai",
+          created_at: "2026-09-06T12:05:00Z",
+        },
         { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T12:00:00Z" },
       ],
     };
-    const cap1: Cap = { rpc: [] };
-    const cap2: Cap = { rpc: [] };
+    const cap1: Cap = { rpc: [], inserts: [] };
+    const cap2: Cap = { rpc: [], inserts: [] };
     await retomar(cenario, cap1);
     await retomar(cenario, cap2);
 
@@ -218,17 +378,14 @@ describe("retorno do humano reenfileira inbound pendente", () => {
     expect(dispatches(cap2)[0]!.args.p_entity_id).toBe(MSG_INBOUND);
   });
 
-  it("mensagem 'vista' por turno coalescido mas sem outbound → elegível no retorno", async () => {
-    // Só inbounds depois da (ausência de) outbound nossa: o critério NÃO olha
-    // ultima_inbound_vista_em — se o cliente falou e ninguém do nosso lado
-    // respondeu, o retorno despacha.
-    const cap: Cap = { rpc: [] };
+  it("mensagem 'vista' por turno coalescido mas sem outbound humana → elegível no retorno", async () => {
+    const cap: Cap = { rpc: [], inserts: [] };
     await retomar(
       {
         mensagens: [
           { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T12:05:00Z" },
           {
-            id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             direction: "inbound",
             created_at: "2026-09-06T12:00:00Z",
           },
@@ -242,7 +399,7 @@ describe("retorno do humano reenfileira inbound pendente", () => {
   });
 
   it("sem canal → não enfileira", async () => {
-    const cap: Cap = { rpc: [] };
+    const cap: Cap = { rpc: [], inserts: [] };
     await retomar(
       {
         channel_session_id: null,
@@ -256,7 +413,7 @@ describe("retorno do humano reenfileira inbound pendente", () => {
   });
 
   it("conversa fechada → não enfileira", async () => {
-    const cap: Cap = { rpc: [] };
+    const cap: Cap = { rpc: [], inserts: [] };
     await retomar(
       {
         status: "closed",

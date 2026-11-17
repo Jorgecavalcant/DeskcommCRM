@@ -90,9 +90,37 @@ describe("os dois lados do schema da tool de passagem", () => {
     expect(requestHumanHandoffInputSchema.parse(payload)).toEqual(payload);
   });
 
-  it("o lado largo deixa o runtime ensinar sobre código inválido", () => {
+  it("o schema exposto ao modelo declara o enum (não string livre)", () => {
+    const forma = (LARGO as unknown as { def: { shape: Record<string, z.ZodType> } }).def.shape;
+    const campo = forma.motivo_codigo;
+    // optional(enum) — desce até o enum interno
+    let atual: unknown = campo;
+    for (let i = 0; i < 4; i += 1) {
+      const def = (atual as { def?: { type?: string; innerType?: unknown; entries?: unknown } })?.def;
+      if (def?.type === "enum" || def?.entries !== undefined) {
+        const entries = def.entries ?? (def as { values?: unknown }).values;
+        const valores = Array.isArray(entries)
+          ? entries
+          : entries && typeof entries === "object"
+            ? Object.keys(entries as object)
+            : [];
+        expect(valores).toEqual(expect.arrayContaining(["requested_human", "critical_stage"]));
+        return;
+      }
+      atual = def?.innerType ?? (atual as { _def?: { innerType?: unknown } })._def?.innerType;
+      if (atual === undefined) break;
+    }
+    // Fallback: JSON Schema do Zod 4
+    const js = z.toJSONSchema(campo as z.ZodType);
+    const enumVals =
+      (js as { enum?: string[] }).enum ??
+      ((js as { anyOf?: Array<{ enum?: string[] }> }).anyOf ?? []).flatMap((a) => a.enum ?? []);
+    expect(enumVals).toEqual(expect.arrayContaining(["requested_human", "critical_stage"]));
+  });
+
+  it("código inválido no enum do LARGO falha; a whitelist sozinha também — o runtime normaliza antes", () => {
     const payload = { motivo_codigo: "inventado" };
-    expect(LARGO.safeParse(payload).success).toBe(true);
+    expect(LARGO.safeParse(payload).success).toBe(false);
     expect(requestHumanHandoffInputSchema.safeParse(payload).success).toBe(false);
   });
 
@@ -102,5 +130,6 @@ describe("os dois lados do schema da tool de passagem", () => {
     expect(descricao).toContain("requested_human");
     expect(descricao).toContain("critical_stage");
     expect(descricao).toContain("Não use critical_stage só porque o cliente mencionou agendamento");
+    expect(descricao).toMatch(/APENAS|requested_human.*critical_stage/i);
   });
 });

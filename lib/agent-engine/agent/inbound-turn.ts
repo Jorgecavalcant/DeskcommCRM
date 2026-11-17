@@ -587,10 +587,11 @@ export const AGENT_TOOL_DEFS = {
     inputSchema: z
       .object({
         motivo_codigo: z
-          .string()
+          .enum(['requested_human', 'critical_stage'])
           .optional()
           .describe(
-            'código do motivo: requested_human quando o cliente pede uma pessoa; critical_stage ' +
+            'APENAS um destes valores literais: "requested_human" | "critical_stage". ' +
+              'requested_human quando o cliente pede uma pessoa; critical_stage ' +
               'quando uma etapa exige finalização humana (ex.: concluir um agendamento já coletado). ' +
               'Não use critical_stage só porque o cliente mencionou agendamento. ' +
               'Sem este campo, a passagem fica registrada como low_confidence (você não resolveu sozinho); ' +
@@ -809,6 +810,8 @@ const inboundTurnPayloadSchema = z
     channel_session_id: z.string().uuid(),
     inbound_message_id: z.string().uuid(),
     crm_event_id: z.string().uuid(),
+    /** Devolução (`escalacao.retomada`) — corte `ultima_humana` no prompt. */
+    corte_pendencias: z.literal('ultima_humana').optional(),
   })
   .passthrough();
 
@@ -7659,6 +7662,11 @@ export async function runAgentPreview(
 export function createInboundTurnHandler(deps: InboundTurnDeps) {
   return async (job: JobRow, pool: pg.Pool, ctx: { workerId: string }): Promise<void> => {
     const payload = inboundTurnPayloadSchema.parse(job.payload);
+    // Devolução ao robô propaga `corte_pendencias: 'ultima_humana'` no payload
+    // (sem migration). Só o bloco "Mensagem atual" usa esse modo; opt-out,
+    // comercial e métricas ficam no clássico via `inboundsNaoRespondidos()`.
+    const cortePendencias =
+      payload.corte_pendencias === 'ultima_humana' ? ('ultima_humana' as const) : ('classico' as const);
     if (!job.contact_id) throw new Error('reply_without_contact');
     // AS TRAVAS VÊM ANTES DE ESCOLHER O AGENTE, e é aqui que elas precisam estar.
     //
@@ -7861,6 +7869,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           origemBlock,
           formatoDoHistorico,
           passagemBlock,
+          cortePendencias,
         ),
     });
   };

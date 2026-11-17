@@ -45,6 +45,20 @@ export interface LeadContextMessage {
   /** Corpo textual; mídia usa o derivado (transcrição/visão/pdf) ou marcador [tipo]. */
   body: string;
   /**
+   * Autoria da outbound — alimenta o corte `ultima_humana` na devolução
+   * (`outboundHumanaRespondeu`). Ausente em fixtures antigas = trata como
+   * "desconhecido" (qualquer outbound corta).
+   */
+  sent_via?: string | null;
+  /** Preenchido quando um humano do time enviou — vence `sent_via` no corte. */
+  sent_by_user_id?: string | null;
+  /**
+   * Marca do aviso de transferência (`messages.metadata.aviso_de_escalacao`).
+   * No corte clássico essa outbound NÃO zera pendências — a pergunta do cliente
+   * antes do aviso continua listada. Ausente = não é aviso.
+   */
+  aviso_de_escalacao?: boolean;
+  /**
    * Quem escreveu esta mensagem quando ela veio de um GRUPO (#2729).
    *
    * Numa conversa 1:1 o autor é óbvio: é o contato da ficha. Num grupo há três
@@ -229,6 +243,9 @@ interface HistoryRow {
   media_mime: string | null;
   media_derived_text: string | null;
   sent_at: Date;
+  /** Autoria — alimenta o corte "pendente desde a última resposta humana". */
+  sent_via?: string | null;
+  sent_by_user_id?: string | null;
   /** #2729: `group_sender` do ingest de grupo — a única fonte de quem falou. */
   metadata: Record<string, unknown> | null;
   /** O último modelo aprovado da conversa, trazido de FORA da janela — ver `MODELO_FIXADO_DIAS`. */
@@ -314,7 +331,8 @@ export async function getLeadContext(
             .query<HistoryRow>(
               `select * from (
                 (select id, direction, type, body, media_url, media_storage_path, media_mime,
-                        media_derived_text, sent_at, metadata, false as fixado
+                        media_derived_text, sent_at, sent_via, sent_by_user_id, metadata,
+                        false as fixado
                  from messages
                  where organization_id = $1 and conversation_id = $2
                    and direction in ('inbound', 'outbound')
@@ -326,7 +344,8 @@ export async function getLeadContext(
                  limit $3)
                 union all
                 (select id, direction, type, body, media_url, media_storage_path, media_mime,
-                        media_derived_text, sent_at, metadata, true as fixado
+                        media_derived_text, sent_at, sent_via, sent_by_user_id, metadata,
+                        true as fixado
                  from messages
                  where organization_id = $1 and conversation_id = $2
                    and direction = 'outbound' and type = 'template'
@@ -518,12 +537,16 @@ function fitToBudget(
     // recebido de grupo traz `group_sender` (o ingest grava só nesse sentido);
     // nas demais linhas o campo fica AUSENTE, e o prompt não ganha ruído.
     const remetente = m.direction === 'inbound' ? lerRemetenteDeGrupo(m.metadata) : null;
+    const avisoDeEscalacao = m.metadata?.aviso_de_escalacao === true;
     return {
       direction: m.direction,
       body,
       // Hora de PAREDE do tenant, não UTC cru — ver o comentário de `sent_at` na
       // interface acima e o cabeçalho de `isoLocalComOffset`.
       sent_at: isoLocalComOffset(m.sent_at, fuso),
+      ...(m.sent_via !== undefined ? { sent_via: m.sent_via } : {}),
+      ...(m.sent_by_user_id !== undefined ? { sent_by_user_id: m.sent_by_user_id } : {}),
+      ...(avisoDeEscalacao ? { aviso_de_escalacao: true } : {}),
       ...(remetente !== null && (remetente.name !== null || remetente.phone !== null)
         ? { sender: { name: remetente.name, phone: remetente.phone } }
         : {}),

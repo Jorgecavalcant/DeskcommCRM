@@ -107,4 +107,43 @@ describe("rajada no bloco Mensagem atual", () => {
     expect(abertura).toContain("Responda a ESTA mensagem agora.");
     expect(abertura).not.toMatch(/Responda a TODAS/i);
   });
+
+  it("devolução: Olá + fiado + saudação da IA → lista as duas (corte ultima_humana)", () => {
+    // Caso real na DEVOLUÇÃO: IA respondeu só "Oi, Bruna!" e a pergunta ficou
+    // sem resposta. Turno normal usaria clássico (cortaria); a devolução passa
+    // `ultima_humana` via payload do job.
+    const contexto = contextoCom([
+      { direction: "inbound", body: OLA, sent_at: "2026-09-06T09:03:00-04:00" },
+      { direction: "inbound", body: FIADO, sent_at: "2026-09-06T09:03:04-04:00" },
+      {
+        direction: "outbound",
+        body: "Oi, Bruna!",
+        sent_at: "2026-09-06T09:03:10-04:00",
+        sent_via: "ai",
+        sent_by_user_id: null,
+      },
+    ]);
+
+    const abertura = buildOpeningMessage(
+      null,
+      null,
+      contexto,
+      "sem notas",
+      false,
+      [],
+      "",
+      FIADO,
+      undefined,
+      "",
+      "json",
+      "",
+      "ultima_humana",
+    );
+
+    expect(abertura).toContain('{"texto":"Olá"}');
+    expect(abertura).toContain('{"texto":"Como funciona o fiado?"}');
+    expect(abertura).toMatch(/Responda a TODAS numa única resposta/i);
+    expect(abertura).toMatch(/saudação sozinha NÃO basta/i);
+    expect(abertura).toMatch(/cada pergunta\/pedido concreto/i);
+  });
 });

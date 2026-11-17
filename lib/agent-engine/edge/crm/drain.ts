@@ -51,6 +51,8 @@ const dispatchPayloadSchema = z
     contact_id: z.string().uuid(),
     channel_session_id: z.string().uuid(),
     inbound_message_id: z.string().uuid(),
+    /** Devolução (`escalacao.retomada`) — propagado ao job sem migration. */
+    corte_pendencias: z.literal('ultima_humana').optional(),
   })
   .passthrough();
 
@@ -650,6 +652,11 @@ async function processEvent(
       });
     }
   }
+  // Devolução (`escalacao.retomada`) marca o payload; o turno lê e aplica o
+  // corte `ultima_humana` só no bloco "Mensagem atual". Opt-out/métricas
+  // continuam no clássico — sem estado global.
+  const cortePendencias =
+    p.corte_pendencias === 'ultima_humana' ? 'ultima_humana' : undefined;
   const { job, deduped } = await enqueueJob(pool, event.organization_id, {
     kind: 'inbound_turn',
     leadId: p.contact_id,
@@ -660,6 +667,7 @@ async function processEvent(
       channel_session_id: p.channel_session_id,
       inbound_message_id: p.inbound_message_id,
       crm_event_id: event.id,
+      ...(cortePendencias ? { corte_pendencias: cortePendencias } : {}),
     },
     ...(runAfter !== undefined ? { runAfter } : {}),
   });

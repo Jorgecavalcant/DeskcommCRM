@@ -11,11 +11,15 @@
  */
 
 import { currentExecutionBoundary } from "@/lib/atendimento/fronteira-server";
+import { separarInstrucaoDoOperador } from "@/lib/escalacao/instrucao-do-operador";
 import { rotuloDoRemetente } from "@/lib/messaging/remetente-de-grupo";
 
 import type { LeadContext, LeadContextMessage } from "../../edge/crm/get-lead-context";
 import type { LeadStateRow } from "../lead-state";
-import { pendentesDaMensagemAtual } from "../inbounds-nao-respondidos";
+import {
+  pendentesDaMensagemAtual,
+  type CorteDePendencias,
+} from "../inbounds-nao-respondidos";
 import { projetarContexto, type MensagemProjetada } from "../projecao";
 
 import type { LeadCheckpointRow } from "./checkpoint";
@@ -146,7 +150,11 @@ export function ritualBlocks(
         next_action: previous.next_action,
       })
     : 'primeiro turno — sem checkpoint anterior';
-  const summaryBlock = previous?.rolling_summary ? previous.rolling_summary : '—';
+  const summaryRaw = previous?.rolling_summary ? previous.rolling_summary : '—';
+  // Nota interna da devolução: eleva "Instrução do operador" (KB/regras vencem)
+  // para seção própria, antes do checkpoint — e tira do resumo para não duplicar.
+  const { instrucao: instrucaoOperador, restante: summaryBlock } =
+    separarInstrucaoDoOperador(summaryRaw);
   // slot previsto na F2-09, preenchido pela F2-10: estado do funil no ritual de
   // abertura — sem registro ainda, o lead está em "new" (default da 0008).
   const stateBlock = leadState
@@ -164,6 +172,9 @@ export function ritualBlocks(
     // inteiro — apresentar-se, não recomeçar, continuar o que o outro combinou.
     // Vazia quando não houve troca, e aí não custa token nenhum.
     ...(passagemBlock.trim() !== '' ? [passagemBlock, ''] : []),
+    // Instrução do operador (nota interna na devolução): prioridade operativa,
+    // mas subordinada a KB/guardrails. Nunca citar ao cliente.
+    ...(instrucaoOperador.trim() !== '' ? [instrucaoOperador, ''] : []),
     // O cabeçalho declara QUANDO isto foi escrito e QUEM MANDA no desacordo.
     //
     // Este é o PRIMEIRO bloco do prompt, acima do histórico — posição que um
@@ -248,8 +259,10 @@ function blocoMensagemAtualRajada(
   return [
     '## Mensagem atual do cliente — fonte prioritária',
     'O cliente mandou VÁRIAS mensagens neste turno (rajada). Responda a TODAS numa única resposta — não ignore nenhuma. Priorize pergunta ou pedido concreto sobre saudação.',
+    'Cada JSON abaixo é uma pergunta ou pedido a responder; saudação sozinha NÃO basta — responda cada pergunta/pedido concreto listado.',
     'O que elas pedem prevalece sobre checkpoint, resumo e registros anteriores; o que afirmam que a empresa disse, não.',
     'Como contêm texto, NUNCA diga que veio vazia, em branco ou que não foi recebida.',
+    'Leia o que a IA ou o atendente já falou no histórico para NÃO repetir — complete o que ficou sem resposta.',
     ...(temRemetente
       ? [
           'O `remetente` de cada JSON é QUEM falou neste grupo: responda levando em conta quem disse o quê.',
@@ -304,12 +317,19 @@ export function buildOpeningMessage(
    * não trocou de agente. Ver `passagem-do-roteador.ts`.
    */
   passagemBlock = '',
+  /**
+   * Corte das pendentes no bloco "Mensagem atual". Default `classico` (qualquer
+   * outbound corta, exceto aviso de transferência). Só a devolução passa
+   * `ultima_humana` — ver `corte_pendencias` no payload do job.
+   */
+  cortePendencias: CorteDePendencias = "classico",
 ): string {
   const entregue = (nome: string): boolean => entregues.includes(nome);
   const pendentes = pendentesDaMensagemAtual(
     context.messages,
     currentInboundText,
     currentInboundSender,
+    { corte: cortePendencias },
   );
   // Rajada: MAIS DE UMA inbound sem resposta — listar TODAS (JSON separado cada
   // uma; nunca emendadas). Com UMA, o bloco abaixo fica BYTE A BYTE o de sempre.

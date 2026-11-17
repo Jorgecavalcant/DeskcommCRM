@@ -161,6 +161,9 @@ function conversaPassadaAHumano(over: Record<string, unknown> = {}) {
     assigned_to_user_id: ATENDENTE,
     assignee_kind: "user",
     bot_silenced_until: "infinity",
+    // Fronteira que o checkpoint de retomada precisa gravar (senão latestCheckpoint filtra).
+    service_revision: 3,
+    current_demanda_id: null,
     ...over,
   };
 }
@@ -310,6 +313,15 @@ describe("devolver o atendimento ao agente", () => {
     const checkpoint = cap.inserts.find((i) => i.tabela === "lead_checkpoints");
     expect(checkpoint, "sem checkpoint o agente volta cego").toBeDefined();
 
+    // Fronteira obrigatória: sem conversation_id/service_revision o
+    // latestCheckpoint do turno descarta a linha e a nota nunca chega.
+    expect(checkpoint!.valores).toMatchObject({
+      conversation_id: CONV,
+      service_revision: 3,
+      demanda_id: null,
+      demanda_revision: null,
+    });
+
     const resumo = String(checkpoint!.valores.rolling_summary);
     // O acumulado ANTERIOR sobrevive: sobrescrever apagaria o histórico da
     // conversa justamente para contar um pedaço dela.
@@ -318,6 +330,29 @@ describe("devolver o atendimento ao agente", () => {
     expect(resumo).toContain("Aprovei 15% de desconto");
     expect(resumo).toContain("Desconto acima da alçada");
     expect(checkpoint!.valores.commitments).toEqual(["enviar proposta"]);
+  });
+
+  it("nota interna entra no checkpoint como Instrução do operador (KB vence)", async () => {
+    const cap = novaCaptura();
+    await retomar(
+      cenarioComAtendimentoHumano({
+        notas: [
+          {
+            body: "responda com o preço da tabela; ignore se o cliente pedir desconto fora da política",
+            created_by_name: "Ana",
+            created_at: "2026-08-04T12:30:00Z",
+          },
+        ],
+      }),
+      cap,
+    );
+    const checkpoint = cap.inserts.find((i) => i.tabela === "lead_checkpoints");
+    expect(checkpoint).toBeDefined();
+    const resumo = String(checkpoint!.valores.rolling_summary);
+    expect(resumo).toContain("## Instrução do operador");
+    expect(resumo).toMatch(/KB e as regras VENCEM/i);
+    expect(resumo).toContain("preço da tabela");
+    expect(resumo).toContain("NUNCA cite");
   });
 
   it("pedido feito ao cliente vira a próxima ação do agente", async () => {

@@ -21,6 +21,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { textoLegivelDeMencao } from "@/lib/notifications/mentions";
 
+import { montarBlocoInstrucaoDoOperador } from "./instrucao-do-operador";
+
 /** O que a pessoa decidiu num chamado, na linguagem de quem vai ler. */
 export interface DecisaoHumana {
   chamadoId: string;
@@ -145,9 +147,31 @@ export async function lerContinuidadeHumana(
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: false })
     .limit(LIMITE_POR_SUPERFICIE);
-  const notas = ((notesData ?? []) as NoteRow[])
-    .map((n) => ({ autor: n.created_by_name, texto: textoLegivelDeMencao(n.body), quando: n.created_at }))
+  const todasNotas = ((notesData ?? []) as NoteRow[])
+    .map((n) => ({
+      autor: n.created_by_name,
+      texto: textoLegivelDeMencao(n.body),
+      quando: n.created_at,
+    }))
     .reverse();
+
+  // Só as notas DEPOIS do último turno da IA entram como instrução na devolução.
+  // Notas antigas já devem estar no rolling_summary de turnos anteriores.
+  const { data: ultimaIa } = await supabase
+    .from("messages")
+    .select("created_at")
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("direction", "outbound")
+    .eq("sent_via", "ai")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const corteIa = (ultimaIa as { created_at?: string } | null)?.created_at ?? null;
+  const notas =
+    corteIa === null
+      ? todasNotas
+      : todasNotas.filter((n) => n.quando > corteIa);
 
   const decisoes: DecisaoHumana[] = eventos.map((e) => ({
     chamadoId: e.case_id,
@@ -171,7 +195,9 @@ export async function lerContinuidadeHumana(
   const pendenciaComOCliente =
     ultimoPedido && ultimoPedido.texto !== "" ? ultimoPedido.texto : null;
 
-  const houveAtendimentoHumano = decisoes.length > 0 || notas.length > 0;
+  // "Houve humano" olha TODAS as notas (não só as pós-IA): decisão ou nota
+  // antiga ainda prova que alguém mexeu na conversa.
+  const houveAtendimentoHumano = decisoes.length > 0 || todasNotas.length > 0;
 
   return {
     houveAtendimentoHumano,
@@ -195,6 +221,9 @@ export function montarResumo(input: {
   notas: NotaInterna[];
   pendenciaComOCliente: string | null;
 }): string {
+  // Bloco prioritário primeiro: o ritual o eleva; KB/regras vencem a nota.
+  const instrucao = montarBlocoInstrucaoDoOperador(input.notas);
+
   const linhas: string[] = [
     "Uma pessoa da equipe assumiu esta conversa e devolveu o atendimento para você.",
     "O que ela fez, e que o cliente já considera combinado:",
@@ -206,10 +235,7 @@ export function montarResumo(input: {
     linhas.push(`- No chamado "${d.chamadoTitulo}", ${acao}: ${texto}`);
   }
 
-  for (const n of input.notas) {
-    const autor = n.autor ?? "a equipe";
-    linhas.push(`- ${autor} anotou internamente: ${n.texto}`);
-  }
+  // Notas NÃO se repetem aqui: já estão no bloco "Instrução do operador".
 
   if (input.pendenciaComOCliente !== null) {
     linhas.push(`Ficou pendente com o cliente: ${input.pendenciaComOCliente}`);
@@ -218,5 +244,6 @@ export function montarResumo(input: {
   linhas.push(
     "Retome daqui: não peça de novo o que já foi combinado nem contradiga a decisão da pessoa.",
   );
-  return linhas.join("\n");
+  const continuidade = linhas.join("\n");
+  return instrucao === "" ? continuidade : `${instrucao}\n\n${continuidade}`;
 }

@@ -61,8 +61,10 @@ import { logger } from "@/lib/logger";
 import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
 
 import { lerContinuidadeHumana, type ContinuidadeHumana } from "./continuidade";
+import { removerBlocosInstrucaoDoOperador } from "./instrucao-do-operador";
 import {
   idDaInboundPendenteAposUltimaOutbound,
+  idDaUltimaInbound,
   reenfileirarTurno,
 } from "./reenfileirar-turno";
 
@@ -330,8 +332,17 @@ export async function devolverAtendimentoAoAgente(
   }
 
   // (5) O input estruturado que a IA lê para retomar (invariante 2 da doutrina).
+  // Grava com as colunas de fronteira (conversation_id / service_revision /
+  // demanda_*) — senão `latestCheckpoint` no turno filtra a linha e a nota
+  // nunca chega ao prompt.
   if (conv.contact_id !== null && continuidade.houveAtendimentoHumano) {
-    await gravarCheckpointDeRetomada(supabase, organizationId, conv.contact_id, continuidade);
+    await gravarCheckpointDeRetomada(
+      supabase,
+      organizationId,
+      conv.contact_id,
+      input.conversationId,
+      continuidade,
+    );
   }
 
   // (6) Passagem de atendimento é evento de vida do negócio — a ida já emitia
@@ -364,12 +375,17 @@ export async function devolverAtendimentoAoAgente(
     },
   });
 
-  // (7) Pergunta pendente / mídia forçada: enfileira UM turno inbound. Sem
-  // `inboundMessageIdParaDespacho`, o critério é inbound após a última
-  // outbound — NÃO `ultima_inbound_vista_em`. Com o id forçado (handoff
-  // técnico), despacha mesmo se houver aviso de handoff outbound depois.
-  // Sem canal / conversa fechada / sem contato: não despacha.
-  await talvezReenfileirarPendente(deps, conv, input.inboundMessageIdParaDespacho);
+  // (7) Pergunta pendente / mídia forçada / nota nova: enfileira UM turno.
+  // Sem `inboundMessageIdParaDespacho`, o critério é inbound sem resposta
+  // HUMANA depois (aviso da IA não conta). Com nota nova na devolução,
+  // enfileira mesmo se a última fala foi outbound humana — a IA precisa
+  // agir na instrução. Sem canal / conversa fechada / sem contato: não.
+  await talvezReenfileirarPendente(
+    deps,
+    conv,
+    input.inboundMessageIdParaDespacho,
+    continuidade.notas.length > 0,
+  );
 
   return { ok: true, conversationId: input.conversationId, jaEstavaComOAgente, continuidade };
 }
@@ -378,16 +394,35 @@ async function talvezReenfileirarPendente(
   deps: RetomadaDeps,
   conv: ConversaRow,
   inboundForcada?: string,
+  forcarPorNota = false,
 ): Promise<void> {
   if (!STATUS_REATIVAVEIS.has(conv.status ?? "")) return;
   if (!conv.contact_id || !conv.channel_session_id) return;
 
-  const messageId =
-    inboundForcada ??
-    (await idDaInboundPendenteAposUltimaOutbound(deps.supabase, {
+  let motivo: string;
+  let messageId: string | null;
+  if (inboundForcada) {
+    messageId = inboundForcada;
+    motivo = "retorno_com_inbound_forcada";
+  } else {
+    messageId = await idDaInboundPendenteAposUltimaOutbound(deps.supabase, {
       organizationId: deps.organizationId,
       conversationId: conv.id,
-    }));
+    });
+    if (messageId) {
+      motivo = "retorno_com_inbound_pendente";
+    } else if (forcarPorNota) {
+      // Humano falou por último, mas deixou nota: despacha a última inbound
+      // para a IA ler a instrução (dedupe do event path evita turno duplo).
+      messageId = await idDaUltimaInbound(deps.supabase, {
+        organizationId: deps.organizationId,
+        conversationId: conv.id,
+      });
+      motivo = "retorno_com_nota_do_operador";
+    } else {
+      return;
+    }
+  }
   if (!messageId) return;
 
   await reenfileirarTurno(deps.supabase, {
@@ -400,9 +435,10 @@ async function talvezReenfileirarPendente(
     messageId,
     requestId: deps.requestId,
     source: "escalacao.retomada",
-    motivo: inboundForcada
-      ? "retorno_com_inbound_forcada"
-      : "retorno_com_inbound_pendente",
+    motivo,
+    // O turno da devolução lista pendências desde a última outbound HUMANA —
+    // saudação/aviso da IA não escondem a pergunta do cliente no prompt.
+    cortePendencias: "ultima_humana",
   });
 }
 
@@ -458,6 +494,7 @@ async function gravarCheckpointDeRetomada(
   supabase: SupabaseClient,
   organizationId: string,
   contactId: string,
+  conversationId: string,
   continuidade: ContinuidadeHumana,
 ): Promise<void> {
   const { data: anteriorData } = await supabase
@@ -475,12 +512,46 @@ async function gravarCheckpointDeRetomada(
     rolling_summary: string | null;
   } | null;
 
-  const acumulado = (anterior?.rolling_summary ?? "").trim();
+  // Fronteira da conversa — a mesma que `insertCheckpoint` grava. Sem isto,
+  // `latestCheckpoint` (com boundary) descarta a linha e a nota some do prompt.
+  const { data: fronteiraData } = await supabase
+    .from("conversations")
+    .select("service_revision, current_demanda_id")
+    .eq("id", conversationId)
+    .eq("organization_id", organizationId)
+    .maybeSingle();
+  const fronteira = (fronteiraData ?? null) as {
+    service_revision: number | null;
+    current_demanda_id: string | null;
+  } | null;
+  const serviceRevision = fronteira?.service_revision ?? 1;
+  const demandaId = fronteira?.current_demanda_id ?? null;
+  let demandaRevision: number | null = null;
+  if (demandaId !== null) {
+    const { data: demandaData } = await supabase
+      .from("demandas")
+      .select("revision")
+      .eq("id", demandaId)
+      .eq("organization_id", organizationId)
+      .maybeSingle();
+    demandaRevision =
+      (demandaData as { revision?: number } | null)?.revision ?? null;
+  }
+
+  // Tira instruções velhas do acumulado: senão cada devolução empilhava um
+  // "## Instrução do operador" e o ritual misturava ordem/notas obsoletas.
+  const acumulado = removerBlocosInstrucaoDoOperador(
+    (anterior?.rolling_summary ?? "").trim(),
+  );
   const { error } = await supabase.from("lead_checkpoints").insert({
     organization_id: organizationId,
     contact_id: contactId,
     // Não nasceu de um run do agente — a pessoa é que devolveu o atendimento.
     job_id: null,
+    conversation_id: conversationId,
+    service_revision: serviceRevision,
+    demanda_id: demandaId,
+    demanda_revision: demandaRevision,
     commitments: anterior?.commitments ?? [],
     objections: anterior?.objections ?? [],
     next_action: continuidade.pendenciaComOCliente ?? anterior?.next_action ?? null,
@@ -492,6 +563,7 @@ async function gravarCheckpointDeRetomada(
     // silenciar aqui reproduziria o defeito que este arquivo conserta.
     logger.error("[escalacao.retomada] checkpoint de retomada não foi gravado", {
       contact_id: contactId,
+      conversation_id: conversationId,
       error: error.message,
     });
   }
