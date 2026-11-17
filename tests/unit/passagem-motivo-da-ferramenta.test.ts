@@ -97,12 +97,26 @@ describe("o motivo da passagem acionada pela ferramenta", () => {
     expect(consulta(/update conversations/).params[3]).toBe(texto);
   });
 
-  it.each(["inventado", "orcamento_de_ia", "suspected_optout", "caso_escalado", "verificacao_manual", "__proto__", "", null, 1])(
-    "recusa motivo inválido ou reservado %j antes dos efeitos do wrapper",
+  // Variações comuns (maiúsculas, espaços, sinônimos pt) passam na 1ª chamada.
+  it.each([
+    { bruto: "Requested_Human", esperado: "requested_human" },
+    { bruto: "requested human", esperado: "requested_human" },
+    { bruto: "REQUESTED-HUMAN", esperado: "requested_human" },
+    { bruto: "pedir_humano", esperado: "requested_human" },
+    { bruto: "Critical_Stage", esperado: "critical_stage" },
+    { bruto: "etapa_critica", esperado: "critical_stage" },
+  ])("normaliza $bruto → $esperado na primeira chamada", async ({ bruto, esperado }) => {
+    expect((await passar({ motivo_codigo: bruto })).ok).toBe(true);
+    expect(consulta(/insert into passagens_de_atendimento/).params[6]).toBe(esperado);
+  });
+
+  // Desconhecido / reservado / tipo errado → omite o campo (= low_confidence),
+  // não invalid_value — evita retry na primeira chamada do modelo.
+  it.each(["inventado", "orcamento_de_ia", "suspected_optout", "caso_escalado", "verificacao_manual", "", null, 1])(
+    "motivo desconhecido %j vira low_confidence (não invalid_value)",
     async (motivo_codigo) => {
-      expect(await passar({ motivo_codigo })).toMatchObject({ ok: false, error: { code: "invalid_payload" } });
-      expect(db.query).not.toHaveBeenCalled();
-      expect(cancelPendingCronsForLead).not.toHaveBeenCalled();
+      expect((await passar({ motivo_codigo })).ok).toBe(true);
+      expect(consulta(/insert into passagens_de_atendimento/).params[6]).toBe("low_confidence");
     },
   );
 

@@ -812,8 +812,12 @@ async function corpoDaCentral(
  * um resumo montado do checkpoint e mais nada — nem o porquê, nem o que a IA já
  * tentou, nem o que o cliente pediu com as palavras dele.
  */
+/** Valores aceitos em `motivo_codigo` — o mesmo enum do schema LARGO e da whitelist. */
+export const MOTIVOS_CODIGO_DA_FERRAMENTA = ['requested_human', 'critical_stage'] as const;
+export type MotivoCodigoDaFerramenta = (typeof MOTIVOS_CODIGO_DA_FERRAMENTA)[number];
+
 export const requestHumanHandoffInputSchema = z.strictObject({
-  motivo_codigo: z.enum(['requested_human', 'critical_stage']).optional(),
+  motivo_codigo: z.enum(MOTIVOS_CODIGO_DA_FERRAMENTA).optional(),
   reason: z.string().min(1).max(500).optional(),
   por_que: z.string().min(1).max(500).optional(),
   o_que_tentei: z
@@ -829,11 +833,76 @@ export const requestHumanHandoffInputSchema = z.strictObject({
 });
 
 const PAYLOAD_TEACHING =
-  'Campos aceitos: motivo_codigo (requested_human para pedido de uma pessoa; critical_stage para ' +
-  'uma etapa do atendimento que exige finalização humana), por_que (por que você está passando, em uma frase), o_que_tentei (lista curta ' +
+  'Campos aceitos: motivo_codigo (APENAS requested_human | critical_stage — ' +
+  'requested_human quando o cliente pede uma pessoa; critical_stage quando uma etapa exige ' +
+  'finalização humana). Sem o campo ou com valor desconhecido, a passagem fica low_confidence. ' +
+  'por_que (por que você está passando, em uma frase), o_que_tentei (lista curta ' +
   'do que você já tentou, com o desfecho de cada um), cliente_quer (o que a pessoa está pedindo, ' +
   'nas palavras dela). `reason` ainda é aceito como sinônimo de por_que. Nada além disso. Lead, ' +
   'organização e conversa vêm do runtime, nunca do payload da tool.';
+
+/**
+ * Normaliza variações comuns de `motivo_codigo` ANTES da whitelist.
+ *
+ * O modelo escreve maiúsculas, espaços, hífen ou sinônimos em pt na primeira
+ * chamada — e o enum recusava com `invalid_value`, forçando retry. Aqui:
+ * - variações claras → `requested_human` | `critical_stage`
+ * - desconhecido / lixo → omite o campo (default `low_confidence` depois)
+ * - NUNCA promove texto livre a `requested_human` (#3310)
+ */
+export function normalizarMotivoCodigoDaFerramenta(
+  bruto: unknown,
+): MotivoCodigoDaFerramenta | undefined {
+  if (bruto === undefined || bruto === null) return undefined;
+  if (typeof bruto !== 'string') return undefined;
+  const n = bruto
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[\s-]+/g, '_');
+  if (n === '') return undefined;
+  if (n === 'requested_human' || n === 'critical_stage') return n;
+
+  // Sinônimos explícitos de "cliente pediu pessoa" — só estes viram requested_human.
+  if (
+    n === 'pedir_humano' ||
+    n === 'pedido_humano' ||
+    n === 'pedido_de_humano' ||
+    n === 'quer_humano' ||
+    n === 'atendente' ||
+    n === 'falar_com_alguem' ||
+    n === 'falar_com_humano' ||
+    n === 'human_requested' ||
+    n === 'request_human'
+  ) {
+    return 'requested_human';
+  }
+  if (
+    n === 'etapa_critica' ||
+    n === 'stage_critical' ||
+    n === 'critical' ||
+    n === 'finalizacao_humana'
+  ) {
+    return 'critical_stage';
+  }
+  // Desconhecido → omitir (vira low_confidence). Não inventa pedido de humano.
+  return undefined;
+}
+
+/** Aplica a normalização de motivo no payload cru, sem tocar nas outras chaves. */
+export function normalizarPayloadDaPassagem(raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const obj = raw as Record<string, unknown>;
+  if (!('motivo_codigo' in obj)) return raw;
+  const normalizado = normalizarMotivoCodigoDaFerramenta(obj.motivo_codigo);
+  if (normalizado === undefined) {
+    const { motivo_codigo: _omitido, ...resto } = obj;
+    void _omitido;
+    return resto;
+  }
+  return { ...obj, motivo_codigo: normalizado };
+}
 
 export type RequestHumanHandoffResult =
   | { ok: true; status: 'handoff_solicitado'; message: string }
@@ -878,7 +947,9 @@ export async function applyRequestHumanHandoff(
   if (forbidden !== null) {
     return { ok: false, error: { code: 'invalid_payload', message: `campos não reconhecidos: ${forbidden}. ${PAYLOAD_TEACHING}` } };
   }
-  const parsed = requestHumanHandoffInputSchema.safeParse(rawInput);
+  // Normaliza motivo_codigo ANTES da whitelist: maiúsculas/espaços/sinônimos
+  // claros passam na 1ª chamada; lixo vira ausência (= low_confidence), não invalid_value.
+  const parsed = requestHumanHandoffInputSchema.safeParse(normalizarPayloadDaPassagem(rawInput));
   if (!parsed.success) {
     return { ok: false, error: { code: 'invalid_payload', message: `payload inválido em request_human_handoff (${zodIssuesSummary(parsed.error)}). ${PAYLOAD_TEACHING}` } };
   }

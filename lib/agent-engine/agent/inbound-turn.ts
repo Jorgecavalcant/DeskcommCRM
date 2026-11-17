@@ -587,10 +587,11 @@ export const AGENT_TOOL_DEFS = {
     inputSchema: z
       .object({
         motivo_codigo: z
-          .string()
+          .enum(['requested_human', 'critical_stage'])
           .optional()
           .describe(
-            'código do motivo: requested_human quando o cliente pede uma pessoa; critical_stage ' +
+            'APENAS um destes valores literais: "requested_human" | "critical_stage". ' +
+              'requested_human quando o cliente pede uma pessoa; critical_stage ' +
               'quando uma etapa exige finalização humana (ex.: concluir um agendamento já coletado). ' +
               'Não use critical_stage só porque o cliente mencionou agendamento. ' +
               'Sem este campo, a passagem fica registrada como low_confidence (você não resolveu sozinho); ' +
