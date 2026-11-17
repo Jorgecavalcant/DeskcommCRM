@@ -61,6 +61,10 @@ import { logger } from "@/lib/logger";
 import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
 
 import { lerContinuidadeHumana, type ContinuidadeHumana } from "./continuidade";
+import {
+  idDaInboundPendenteAposUltimaOutbound,
+  reenfileirarTurno,
+} from "./reenfileirar-turno";
 
 export interface RetomadaDeps {
   /** Admin client (service role) OU client do request — os dois filtram org aqui. */
@@ -117,6 +121,7 @@ const STATUS_REATIVAVEIS = new Set(["open", "pending", "claimed", "ai_handling"]
 interface ConversaRow {
   id: string;
   contact_id: string | null;
+  channel_session_id: string | null;
   status: string | null;
   assigned_to_user_id: string | null;
   assignee_kind: string | null;
@@ -130,13 +135,21 @@ export async function devolverAtendimentoAoAgente(
     origem?: OrigemDaRetomada;
     /** Dono autorizado pela rota; ausente nos chamadores automáticos. null é uma precondição. */
     expectedAssignee?: string | null;
+    /**
+     * Força o despacho desta inbound (ex.: mídia cuja derivação concluiu no
+     * handoff técnico). Sem isto, o passo 7 só despacha se a ÚLTIMA fala for
+     * inbound — e o aviso de handoff (outbound da IA) esconderia a mídia.
+     */
+    inboundMessageIdParaDespacho?: string;
   },
 ): Promise<RetomadaResultado> {
   const { supabase, organizationId } = deps;
 
   const { data: convData, error: convErr } = await supabase
     .from("conversations")
-    .select("id, contact_id, status, assigned_to_user_id, assignee_kind, bot_silenced_until")
+    .select(
+      "id, contact_id, channel_session_id, status, assigned_to_user_id, assignee_kind, bot_silenced_until",
+    )
     .eq("id", input.conversationId)
     .eq("organization_id", organizationId)
     .maybeSingle();
@@ -351,7 +364,46 @@ export async function devolverAtendimentoAoAgente(
     },
   });
 
+  // (7) Pergunta pendente / mídia forçada: enfileira UM turno inbound. Sem
+  // `inboundMessageIdParaDespacho`, o critério é inbound após a última
+  // outbound — NÃO `ultima_inbound_vista_em`. Com o id forçado (handoff
+  // técnico), despacha mesmo se houver aviso de handoff outbound depois.
+  // Sem canal / conversa fechada / sem contato: não despacha.
+  await talvezReenfileirarPendente(deps, conv, input.inboundMessageIdParaDespacho);
+
   return { ok: true, conversationId: input.conversationId, jaEstavaComOAgente, continuidade };
+}
+
+async function talvezReenfileirarPendente(
+  deps: RetomadaDeps,
+  conv: ConversaRow,
+  inboundForcada?: string,
+): Promise<void> {
+  if (!STATUS_REATIVAVEIS.has(conv.status ?? "")) return;
+  if (!conv.contact_id || !conv.channel_session_id) return;
+
+  const messageId =
+    inboundForcada ??
+    (await idDaInboundPendenteAposUltimaOutbound(deps.supabase, {
+      organizationId: deps.organizationId,
+      conversationId: conv.id,
+    }));
+  if (!messageId) return;
+
+  await reenfileirarTurno(deps.supabase, {
+    organizationId: deps.organizationId,
+    conversation: {
+      id: conv.id,
+      contact_id: conv.contact_id,
+      channel_session_id: conv.channel_session_id,
+    },
+    messageId,
+    requestId: deps.requestId,
+    source: "escalacao.retomada",
+    motivo: inboundForcada
+      ? "retorno_com_inbound_forcada"
+      : "retorno_com_inbound_pendente",
+  });
 }
 
 function recusarSempreHumano(
