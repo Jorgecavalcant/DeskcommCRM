@@ -11,6 +11,7 @@
  */
 
 import { currentExecutionBoundary } from "@/lib/atendimento/fronteira-server";
+import { separarInstrucaoDoOperador } from "@/lib/escalacao/instrucao-do-operador";
 import { rotuloDoRemetente } from "@/lib/messaging/remetente-de-grupo";
 
 import type { LeadContext, LeadContextMessage } from "../../edge/crm/get-lead-context";
@@ -146,7 +147,11 @@ export function ritualBlocks(
         next_action: previous.next_action,
       })
     : 'primeiro turno — sem checkpoint anterior';
-  const summaryBlock = previous?.rolling_summary ? previous.rolling_summary : '—';
+  const summaryRaw = previous?.rolling_summary ? previous.rolling_summary : '—';
+  // Nota interna da devolução: eleva "Instrução do operador" (KB/regras vencem)
+  // para seção própria, antes do checkpoint — e tira do resumo para não duplicar.
+  const { instrucao: instrucaoOperador, restante: summaryBlock } =
+    separarInstrucaoDoOperador(summaryRaw);
   // slot previsto na F2-09, preenchido pela F2-10: estado do funil no ritual de
   // abertura — sem registro ainda, o lead está em "new" (default da 0008).
   const stateBlock = leadState
@@ -164,6 +169,9 @@ export function ritualBlocks(
     // inteiro — apresentar-se, não recomeçar, continuar o que o outro combinou.
     // Vazia quando não houve troca, e aí não custa token nenhum.
     ...(passagemBlock.trim() !== '' ? [passagemBlock, ''] : []),
+    // Instrução do operador (nota interna na devolução): prioridade operativa,
+    // mas subordinada a KB/guardrails. Nunca citar ao cliente.
+    ...(instrucaoOperador.trim() !== '' ? [instrucaoOperador, ''] : []),
     // O cabeçalho declara QUANDO isto foi escrito e QUEM MANDA no desacordo.
     //
     // Este é o PRIMEIRO bloco do prompt, acima do histórico — posição que um
