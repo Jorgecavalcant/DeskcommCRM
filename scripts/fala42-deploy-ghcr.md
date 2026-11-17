@@ -37,5 +37,6 @@ Se o compose usa variáveis `APP_IMAGE` / `WORKER_IMAGE` no `.env`, exporte-as a
 
 ## Tags publicadas pelo CI
 
-- `prod` — último build do branch `base/prod-1.111.0`
+- `prod` — último build do branch `base/prod-1.111.0` (só em push / `workflow_dispatch`)
 - SHA curto do commit (7 caracteres)
+- Em PR contra `base/prod-1.111.0` o workflow só faz build de validação (`push: false`)
