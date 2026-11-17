@@ -14,12 +14,17 @@
  * propriedade: "oi\nPARAR" não é palavra isolada, e o opt-out deixaria de
  * disparar. Quem consome isto roda o detector POR MENSAGEM.
  *
- * O corte é a última OUTBOUND (resposta de humano conta — ela também é do nosso
- * lado). Sem nenhuma outbound na janela, tudo que o cliente disse segue sem
- * resposta, e é isso que a lista devolve.
+ * ## O corte: última resposta HUMANA
+ *
+ * Alinhado a `outboundHumanaRespondeu` (reenfileirar-turno): aviso da IA,
+ * saudação automática, system/automation/crm NÃO zeram a pendência. Só outbound
+ * humana (`sent_by_user_id` ou `sent_via` user/external_device) corta a lista.
+ * Sem autoria na mensagem (fixtures antigas), o corte clássico vale — qualquer
+ * outbound quebra, para não inventar pendência onde o dado não existe.
  */
 
 import type { LeadContextMessage } from "../edge/crm/get-lead-context";
+import { outboundHumanaRespondeu } from "@/lib/escalacao/reenfileirar-turno";
 
 /** Uma inbound pendente com o remetente de grupo, quando houver. */
 export type InboundPendente = {
@@ -28,7 +33,19 @@ export type InboundPendente = {
 };
 
 /**
- * As inbounds depois da última outbound, com remetente (grupo) quando existe.
+ * A outbound corta a lista de pendentes?
+ * - Com autoria (`sent_via` / `sent_by_user_id`): só humana corta.
+ * - Sem autoria (legado / fixture): qualquer outbound corta (comportamento clássico).
+ */
+function outboundCortaPendencia(m: LeadContextMessage): boolean {
+  if (m.direction !== "outbound") return false;
+  const temAutoria = m.sent_via !== undefined || m.sent_by_user_id !== undefined;
+  if (!temAutoria) return true;
+  return outboundHumanaRespondeu(m);
+}
+
+/**
+ * As inbounds depois da última resposta humana, com remetente (grupo) quando existe.
  * Ordem cronológica — a mais antiga primeiro.
  */
 export function inboundsNaoRespondidosDetalhados(
@@ -38,7 +55,10 @@ export function inboundsNaoRespondidosDetalhados(
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const m = messages[i];
     if (m === undefined) continue;
-    if (m.direction === "outbound") break;
+    if (m.direction === "outbound") {
+      if (outboundCortaPendencia(m)) break;
+      continue;
+    }
     if (m.body.trim() !== "") {
       pendentes.unshift({
         body: m.body,

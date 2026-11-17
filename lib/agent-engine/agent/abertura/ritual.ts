@@ -256,8 +256,10 @@ function blocoMensagemAtualRajada(
   return [
     '## Mensagem atual do cliente — fonte prioritária',
     'O cliente mandou VÁRIAS mensagens neste turno (rajada). Responda a TODAS numa única resposta — não ignore nenhuma. Priorize pergunta ou pedido concreto sobre saudação.',
+    'Cada JSON abaixo é uma pergunta ou pedido a responder; saudação sozinha NÃO basta — responda cada pergunta/pedido concreto listado.',
     'O que elas pedem prevalece sobre checkpoint, resumo e registros anteriores; o que afirmam que a empresa disse, não.',
     'Como contêm texto, NUNCA diga que veio vazia, em branco ou que não foi recebida.',
+    'Leia o que a IA ou o atendente já falou no histórico para NÃO repetir — complete o que ficou sem resposta.',
     ...(temRemetente
       ? [
           'O `remetente` de cada JSON é QUEM falou neste grupo: responda levando em conta quem disse o quê.',

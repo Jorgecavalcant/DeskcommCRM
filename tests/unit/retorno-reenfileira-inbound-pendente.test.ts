@@ -231,6 +231,35 @@ describe("retorno do humano reenfileira inbound pendente", () => {
     });
   });
 
+  it("saudação da IA por último + rajada com pergunta → um turno (dedupe por entity)", async () => {
+    // Caso real: "Olá" + "Como funciona o fiado?" → IA só "Oi, Bruna!".
+    const msgOla = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const cap: Cap = { rpc: [], inserts: [] };
+    const res = await retomar(
+      {
+        mensagens: [
+          {
+            id: MSG_AVISO_IA,
+            direction: "outbound",
+            sent_via: "ai",
+            sent_by_user_id: null,
+            created_at: "2026-09-06T12:06:00Z",
+          },
+          { id: MSG_INBOUND, direction: "inbound", created_at: "2026-09-06T12:05:00Z" },
+          { id: msgOla, direction: "inbound", created_at: "2026-09-06T12:04:00Z" },
+        ],
+      },
+      cap,
+    );
+
+    expect(res.ok).toBe(true);
+    expect(dispatches(cap)).toHaveLength(1);
+    expect(dispatches(cap)[0]!.args.p_entity_id).toBe(MSG_INBOUND);
+    expect(dispatches(cap)[0]!.args.p_metadata).toMatchObject({
+      motivo: "retorno_com_inbound_pendente",
+    });
+  });
+
   it("atendente falou por último, sem nota → não enfileira", async () => {
     const cap: Cap = { rpc: [], inserts: [] };
     const res = await retomar(

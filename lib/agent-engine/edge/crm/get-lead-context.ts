@@ -45,6 +45,15 @@ export interface LeadContextMessage {
   /** Corpo textual; mídia usa o derivado (transcrição/visão/pdf) ou marcador [tipo]. */
   body: string;
   /**
+   * Autoria da outbound — o mesmo corte da retomada (`outboundHumanaRespondeu`).
+   * Sem isto, o bloco "Mensagem atual" cortava na primeira outbound (aviso da IA
+   * inclusive) e a rajada perdia perguntas ainda sem resposta humana.
+   * Ausente em fixtures antigas = trata como "desconhecido" (corte clássico).
+   */
+  sent_via?: string | null;
+  /** Preenchido quando um humano do time enviou — vence `sent_via` no corte. */
+  sent_by_user_id?: string | null;
+  /**
    * Quem escreveu esta mensagem quando ela veio de um GRUPO (#2729).
    *
    * Numa conversa 1:1 o autor é óbvio: é o contato da ficha. Num grupo há três
@@ -229,6 +238,9 @@ interface HistoryRow {
   media_mime: string | null;
   media_derived_text: string | null;
   sent_at: Date;
+  /** Autoria — alimenta o corte "pendente desde a última resposta humana". */
+  sent_via?: string | null;
+  sent_by_user_id?: string | null;
   /** #2729: `group_sender` do ingest de grupo — a única fonte de quem falou. */
   metadata: Record<string, unknown> | null;
   /** O último modelo aprovado da conversa, trazido de FORA da janela — ver `MODELO_FIXADO_DIAS`. */
@@ -314,7 +326,8 @@ export async function getLeadContext(
             .query<HistoryRow>(
               `select * from (
                 (select id, direction, type, body, media_url, media_storage_path, media_mime,
-                        media_derived_text, sent_at, metadata, false as fixado
+                        media_derived_text, sent_at, sent_via, sent_by_user_id, metadata,
+                        false as fixado
                  from messages
                  where organization_id = $1 and conversation_id = $2
                    and direction in ('inbound', 'outbound')
@@ -326,7 +339,8 @@ export async function getLeadContext(
                  limit $3)
                 union all
                 (select id, direction, type, body, media_url, media_storage_path, media_mime,
-                        media_derived_text, sent_at, metadata, true as fixado
+                        media_derived_text, sent_at, sent_via, sent_by_user_id, metadata,
+                        true as fixado
                  from messages
                  where organization_id = $1 and conversation_id = $2
                    and direction = 'outbound' and type = 'template'
@@ -524,6 +538,8 @@ function fitToBudget(
       // Hora de PAREDE do tenant, não UTC cru — ver o comentário de `sent_at` na
       // interface acima e o cabeçalho de `isoLocalComOffset`.
       sent_at: isoLocalComOffset(m.sent_at, fuso),
+      ...(m.sent_via !== undefined ? { sent_via: m.sent_via } : {}),
+      ...(m.sent_by_user_id !== undefined ? { sent_by_user_id: m.sent_by_user_id } : {}),
       ...(remetente !== null && (remetente.name !== null || remetente.phone !== null)
         ? { sender: { name: remetente.name, phone: remetente.phone } }
         : {}),
